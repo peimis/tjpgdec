@@ -1,0 +1,25 @@
+author: Miska Peippo <18567301+peimis@users.noreply.github.com>
+type: lib
+description: Mongoose-OS jpeg decompression lib
+version: 0.1
+
+sources:
+  - src
+
+includes:
+  - include
+
+# filesystem:
+#   - fs
+
+config_schema:
+
+libs:
+#  - origin: libs/..
+
+tags:
+  - c
+  - jpeg
+  - hw
+
+manifest_version: 2017-09-29
