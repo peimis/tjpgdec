@@ -11,9 +11,9 @@ typedef void (*mgos_jpeg_pixel_writer_t)(uint16_t x0, uint16_t y0, uint16_t x1, 
 #define JPG_IMAGE_LINE_BUF_SIZE		480
 
 #define SCALE_FACTOR_1		0
-#define SCALE_FACTOR_2		1
-#define SCALE_FACTOR_4		2
-#define SCALE_FACTOR_8		3
+#define SCALE_FACTOR_2		1	// Slightly slower than non-scaled
+#define SCALE_FACTOR_4		2	// Slightly slower than non-scaled
+#define SCALE_FACTOR_8		3	// 2-3 times faster than non-scaled
 
 /**
  *

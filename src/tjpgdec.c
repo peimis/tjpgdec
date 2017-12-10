@@ -4,6 +4,9 @@
 
 mgos_jpeg_pixel_writer_t write_fn;
 
+#define _RGB5(_v) 		(((_v)>>3) & 0x1F)
+#define _RGB6(_v) 		(((_v)>>2) & 0x3F)
+#define TO_RGB565(r, g, b)	((_RGB5(r) << 11) | (_RGB6(g) << 5) | (_RGB5(b)))
 
 // ================ JPG SUPPORT ================================================
 // User defined device identifier
@@ -11,11 +14,19 @@ typedef struct {
 	FILE		*fhndl;			// File handler for input function
 	int			x;				// image top left point X position
 	int			y;				// image top left point Y position
+	//
+	uint8_t		*linebuf;		// memory buffer used for display output in RGB565 format
+	uint16_t	linebuf_w;		// width of line buffer in pixels
+	uint16_t	linebuf_h;		// current height of line buffer in pixels
+	int			linebuf_size;	// buffer w*h
+	uint16_t	linebuf_startline;	// starting line of linebuffer
+	int			linebuf_pixels_left;
+	int			image_pixels_left;
+	//
 	uint8_t		*membuff;		// memory buffer containing the image
 	uint32_t	bufsize;		// size of the memory buffer
 	uint32_t	bufptr;			// memory buffer current position
-	uint8_t	*linbuf[2];		// memory buffer used for display output in RGB565 format
-	uint8_t		linbuf_idx;
+//	uint8_t		linbuf_idx;
 } JPGIODEV;
 
 
@@ -68,9 +79,6 @@ static UINT tjd_buf_input (
 }
 
 
-#define _RGB5(_v) 		(((_v)>>3) & 0x1F)
-#define _RGB6(_v) 		(((_v)>>2) & 0x3F)
-#define TO_RGB565(r, g, b)	((_RGB5(r) << 11) | (_RGB6(g) << 5) | (_RGB5(b)))
 
 // User defined call-back function to output RGB bitmap to display device
 //----------------------
@@ -85,56 +93,61 @@ static UINT tjd_output (
 	BYTE *src = (BYTE*)bitmap;
 
 	// ** Put the rectangular into the display device **
-	int dleft, dtop, dright, dbottom;
 	int x, y;
 
 	const int left = rect->left + dev->x;
 	const int top = rect->top + dev->y;
 	const int right = rect->right + dev->x;
 	const int bottom = rect->bottom + dev->y;
-	dleft = left;
-	dtop = top;
-	dright = right;
-	dbottom = bottom;
 
-	uint32_t len = 2* ((right-left+1) * (bottom-top+1));	// calculate length of data
+	uint32_t len = ((right-left+1) * (bottom-top+1));	// calculate length of data
 
 	if ((len > 0) && (len <= JPG_IMAGE_LINE_BUF_SIZE)) {
-		uint8_t *dest = (uint8_t *)(dev->linbuf[dev->linbuf_idx]);
+		uint16_t *dest = (uint16_t *)dev->linebuf;
 		uint16_t rgb565;
+		int index;
+
+		// A new set of lines begins
+		if ((0 == dev->linebuf_pixels_left) && (0 == rect->left)) {
+			dev->linebuf_startline = rect->top;
+			dev->linebuf_h = rect->bottom - rect->top + 1;
+			dev->linebuf_pixels_left = dev->linebuf_w * dev->linebuf_h;
+/*
+			LOG(LL_INFO, ("Start filling linebuf with rect %d,%d:%d,%d : %d lines %d..%d",
+				rect->left, rect->top, rect->right, rect->bottom,
+				dev->linebuf_h, dev->linebuf_startline, dev->linebuf_startline + dev->linebuf_h ));
+*/
+		}
+
+//		LOG(LL_INFO, ("Fill lines %d..%d X=%d..%d pixels left=%d", top, bottom, left, right, dev->linebuf_pixels_left));
 
 		for (y = top; y <= bottom; y++) {
+			index = (dev->linebuf_w * (y-dev->linebuf_startline)) + left;
 			for (x = left; x <= right; x++) {
 				rgb565 = TO_RGB565(src[0], src[1], src[2]);
-				// Clip to display area
-				if ((x >= dleft) && (y >= dtop) && (x <= dright) && (y <= dbottom)) {
-					*dest++ = (rgb565 >> 8) & 0xFF;
-					*dest++ = rgb565 & 0xFF;
-//					*dest++ = (*src++) & 0xFC;
-//					*dest++ = (*src++) & 0xFC;
-//					*dest++ = (*src++) & 0xFC;
-				}
-				else {
-					*dest++ = 0xa5;
-					*dest++ = 0x5a;
-				}
+				dest[ index++ ] = (rgb565 >> 8) | (rgb565 << 8);
 				src += 3;
 			}
 		}
 
-		if (write_fn) {
-//			LOG(LL_INFO, ("Write Rect %d,%d:%d,%d -> dev %d,%d:%d,%d len=%d", rect->left, rect->top, rect->right, rect->bottom, dleft, dtop, dright, dbottom, len));
-			write_fn(dleft, dtop, dright, dbottom, dev->linbuf[dev->linbuf_idx], len);
-		} else {
-			LOG(LL_WARN, ("No place to put data.."));
+		dev->linebuf_pixels_left -= len;
+
+		if (dev->linebuf_pixels_left <= 0) {
+			const uint32_t pixels_written = dev->linebuf_w * dev->linebuf_h;
+			dev->image_pixels_left -= pixels_written;
+			LOG(LL_INFO, ("Write lines %d-%d W=%d pixels=%d image left=%d", dev->linebuf_startline, dev->linebuf_startline+dev->linebuf_h-1,
+				dev->linebuf_w , pixels_written, dev->image_pixels_left));
+
+			if (write_fn) {
+				write_fn(0, dev->linebuf_startline, dev->linebuf_w-1, dev->linebuf_startline+dev->linebuf_h-1, 
+					dev->linebuf, pixels_written * sizeof(uint16_t) );
+				}
 		}
-		dev->linbuf_idx = ((dev->linbuf_idx + 1) & 1);
 	}
 	else {
-		LOG(LL_WARN, ("Data size error: %d jpg: (%d,%d,%d,%d) disp: (%d,%d,%d,%d)", len, left,top,right,bottom, dleft,dtop,dright,dbottom));
+		LOG(LL_WARN, ("Data size error: %d jpg: (%d,%d:%d,%d)", len, left,top,right,bottom ));
 		return 0;  // stop decompression
 	}
-
 	return 1;	// Continue to decompression
 }
 
@@ -151,9 +164,8 @@ void mgos_jpg_image(void *imageptr, bool is_file, int x, int y, uint8_t scale, m
 	JDEC jd;				// Decompression object (70 bytes)
 	JRESULT rc;
 
-	dev.linbuf[0] = NULL;
-	dev.linbuf[1] = NULL;
-	dev.linbuf_idx = 0;
+	dev.linebuf = NULL;
+//	dev.linbuf_idx = 0;
 
 	dev.fhndl = NULL;
 
@@ -164,6 +176,8 @@ void mgos_jpg_image(void *imageptr, bool is_file, int x, int y, uint8_t scale, m
 	if (!is_file) {
 		int size = 123;
 		// image from buffer
+		LOG(LL_ERROR, ("iMAGE from buffer not supported yet"));
+
 		dev.membuff = imageptr;
 		dev.bufsize = size;
 		dev.bufptr = 0;
@@ -199,39 +213,41 @@ void mgos_jpg_image(void *imageptr, bool is_file, int x, int y, uint8_t scale, m
 			dev.x = x;
 			dev.y = y;
 
-			dev.linbuf[0] = calloc(1, JPG_IMAGE_LINE_BUF_SIZE*3);
-			if (dev.linbuf[0] == NULL) {
-				LOG(LL_WARN, ("Line buffer #0 alloc failed"));
-				goto exit;
-			}
-			dev.linbuf[1] = calloc(1, JPG_IMAGE_LINE_BUF_SIZE*3);
-			if (dev.linbuf[1] == NULL) {
-				LOG(LL_WARN, ("Line buffer #1 alloc failed"));
-				goto exit;
-			}
+			// Make room for a maximum of 16 lines of 16-bit RGB 565 data
+			// linebuf_h is adjusted in tjd_output accordind to given rectangle size
+			dev.linebuf_h = 16;
+			dev.linebuf_w = jd.width / (1 << scale);
+			dev.linebuf_size = sizeof(uint16_t) * dev.linebuf_w * dev.linebuf_h;
+			dev.linebuf_pixels_left = 0;
+			dev.image_pixels_left = dev.linebuf_w * (jd.height / (1 << scale));
+			LOG(LL_INFO, ("JPEG size: %dx%d, position; %d,%d, scale: %d, bytes used: %d", jd.width, jd.height, x, y, scale, jd.sz_pool));
+			LOG(LL_INFO, ("Linebuf size: %dx%d, bytes: %d image %d pixels", dev.linebuf_w, dev.linebuf_h, dev.linebuf_size, dev.image_pixels_left));
 
+			dev.linebuf = calloc(1, dev.linebuf_size);
+			if (dev.linebuf == NULL) {
+				LOG(LL_ERROR, ("Line buffer alloc failed"));
+				goto exit;
+			}
 			write_fn = pixelwriter;
 
 			// Start to decode the JPEG file
 			rc = jd_decomp(&jd, tjd_output, scale);
 
 			if (rc != JDR_OK) {
-				LOG(LL_WARN, ("JPEG decompression error %d", rc));
+				LOG(LL_ERROR, ("JPEG decompression error %d", rc));
 			}
-			LOG(LL_INFO, ("JPEG size: %dx%d, position; %d,%d, scale: %d, bytes used: %d\r\n", jd.width, jd.height, x, y, scale, jd.sz_pool));
 		}
 		else {
-			LOG(LL_WARN, ("JPEG prepare error: %d", rc));
+			LOG(LL_ERROR, ("JPEG prepare error: %d", rc));
 		}
 	}
 	else {
-		LOG(LL_INFO, ("Work buffer alloc failed"));
+		LOG(LL_ERROR, ("Work buffer alloc failed"));
 	}
 
 exit:
 	if (work) free(work);  // free work buffer
-	if (dev.linbuf[0]) free(dev.linbuf[0]);
-	if (dev.linbuf[1]) free(dev.linbuf[1]);
+	if (dev.linebuf) free(dev.linebuf);
 	if (dev.fhndl) fclose(dev.fhndl);  // close input file
 	write_fn = NULL;
 }
